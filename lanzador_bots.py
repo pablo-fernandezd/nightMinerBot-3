@@ -170,6 +170,8 @@ def firmar_mensaje_cip8(payment_signing_key: PaymentSigningKey, message_str: str
 def run_bot_worker(wallet_file_path):
     """
     Esta función es el TRABAJO que realizará CADA bot de Selenium.
+    Se ha actualizado la lógica del bucle de monitoreo (Paso 15) para incluir
+    información detallada sobre los desafíos (All, Solved, Unsolved).
     """
     
     # Extraer un ID simple para los logs, ej: "wallet_1"
@@ -228,6 +230,9 @@ def run_bot_worker(wallet_file_path):
         # Paso 1: Ir a la página
         driver.get("https://sm.midnight.gd/wizard/mine")
         log_bot(f"Abierta la página: {driver.title}")
+
+        # Paso 2 a Paso 13 (Toda la lógica de pegado de dirección y firma permanece igual)
+        # ... (Mantén aquí el código original de los Pasos 2 a 13) ...
 
         # Paso 2: Clic en "Enter an address manually"
         wait.until(EC.element_to_be_clickable(
@@ -342,8 +347,6 @@ def run_bot_worker(wallet_file_path):
         )).click()
         log_bot("Clic en 'Sign'.")
 
-        # --- FASE DE MINADO ---
-        log_bot("Iniciando sesión de minado...")
 
         # Paso 14: Clic en "Start session"
         wait_long = WebDriverWait(driver, 40) 
@@ -352,47 +355,50 @@ def run_bot_worker(wallet_file_path):
         )).click()
         log_bot("¡Sesión iniciada! Entrando en modo monitoreo.")
 
-        # Paso 15: Bucle de monitoreo
+        # Paso 15: Bucle de monitoreo (¡CÓDIGO ACTUALIZADO AQUÍ!)
         while True:
             try:
                 # --- Sección Snapshot ---
                 claim = wait.until(EC.visibility_of_element_located(
                     (By.XPATH, "//*[contains(text(), 'Your estimated claim:')]/following-sibling::span")
                 )).text
-                share = driver.find_element(
-                    By.XPATH, "//*[contains(text(), 'Your estimated share:')]/following-sibling::span"
-                ).text
                 my_solutions = driver.find_element(
                     By.XPATH, "//*[contains(text(), 'Your submitted solutions:')]/following-sibling::span"
                 ).text
-                all_solutions = driver.find_element(
+                all_solutions_submitted = driver.find_element(
                     By.XPATH, "//*[contains(text(), 'All submitted solutions:')]/following-sibling::span"
                 ).text
 
+                # --- Sección Challenge Status (¡NUEVOS DATOS!) ---
+                all_challenges = driver.find_element(
+                    By.XPATH, "//span[@data-testid='all-count']"
+                ).text
+                solved_challenges = driver.find_element(
+                    By.XPATH, "//span[@data-testid='solved-count']"
+                ).text
+                unsolved_challenges = driver.find_element(
+                    By.XPATH, "//span[@data-testid='unsolved-count']"
+                ).text
+                next_challenge_in = driver.find_element(
+                    By.XPATH, "//div[contains(span, 'Next challenge in:')]/span[2]"
+                ).text
+                
                 # --- Sección Miner Status ---
                 miner_status = driver.find_element(
-                    By.XPATH, "//*[contains(text(), 'Miner status')]/following-sibling::span"
+                    By.XPATH, "//*[contains(text(), 'Miner status')]/following-sibling::span//span[1]"
                 ).text
-                current_challenge = driver.find_element(
+                current_challenge_id = driver.find_element(
                     By.XPATH, "//*[contains(text(), 'Current challenge:')]/following-sibling::span"
                 ).text
                 status = driver.find_element(
-                    By.XPATH, "//*[contains(text(), 'Status:')]/following-sibling::span"
-                ).text
-                time_spent = driver.find_element(
-                    By.XPATH, "//*[contains(text(), 'Time spent on this challenge:')]/following-sibling::span"
+                    By.XPATH, "//*[contains(text(), 'Status:')]/following-sibling::span/span[1]"
                 ).text
 
-                # --- Sección Day ---
-                day = driver.find_element(
-                    By.XPATH, "//div[contains(text(), 'Day:')]"
-                ).text
-                next_challenge = driver.find_element(
-                    By.XPATH, "//*[contains(text(), 'Next challenge in:')]/following-sibling::span"
-                ).text
-
-                log_bot(f"PROGRESO: [{miner_status}] Claim: {claim} | Mis Sol: {my_solutions} | "
-                    f"Challenge: {current_challenge} | Status: {status} | Próximo en: {next_challenge}")
+                log_bot("----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+                log_bot(f"PROGRESO: [{miner_status}] Claim: {claim} | Mis Sol: {my_solutions} / {all_solutions_submitted}")
+                log_bot(f"CHALLENGE STATUS: All: {all_challenges} | Solved: {solved_challenges} | Unsolved: {unsolved_challenges} | Current ID: {current_challenge_id}")
+                log_bot(f"MINER STATUS: {status} | Próximo en: {next_challenge_in}")
+                log_bot("----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
 
             except (NoSuchElementException, TimeoutException) as e:
                 log_bot(f"Error al leer datos de progreso (puede ser temporal): {str(e)[:100]}... Refrescando...", logging.WARNING)
@@ -413,7 +419,6 @@ def run_bot_worker(wallet_file_path):
     finally:
         driver.quit()
         log_bot("Navegador cerrado. Proceso terminado.")
-
 
 # =============================================================================
 # SECCIÓN 3: LANZADOR PRINCIPAL (Corregido para lanzar N procesos secuencialmente)
