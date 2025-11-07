@@ -16,7 +16,7 @@ from pycardano import (
     StakeVerificationKey,    
     HDWallet 
 )
-# Importar Mnemonic desde su propia librería
+# Importar Mnemonic desde su propia librería (Correcto para tu entorno)
 from mnemonic.mnemonic import Mnemonic
 # Importamos las funciones CIP-8
 from pycardano.cip import cip8
@@ -40,7 +40,7 @@ log = logging.getLogger()
 # =============================================================================
 
 # =============================================================================
-# SECCIÓN 1: GESTOR DE CARTERAS (Lógica correcta)
+# SECCIÓN 1: GESTOR DE CARTERAS (Lógica actual y funcional)
 # =============================================================================
 
 CARTERAS_DIR = "pool_de_carteras"
@@ -52,6 +52,7 @@ STAKE_DERIVATION_PATH = "m/1852'/1815'/0'/2/0"
 def generar_nueva_cartera():
     """
     Genera la Base Address y obtiene las claves de Pago y Staking.
+    (Utiliza el slicing de xprivate_key para compatibilidad con tu pycardano)
     """
     log.info("Iniciando generación de nueva cartera (Base Address)...")
     try:
@@ -67,6 +68,7 @@ def generar_nueva_cartera():
 
         # --- 3. CLAVES DE PAGO (PARA CIP-8) ---
         payment_derived_key = root_key.derive_from_path(PAYMENT_DERIVATION_PATH)
+        # ¡IMPORTANTE!: Tu corrección descubierta: usar .xprivate_key y el slicing [0:32]
         payment_private_key_seed_32 = payment_derived_key.xprivate_key[0:32]
         payment_signing_key = PaymentSigningKey(payment_private_key_seed_32)
         payment_verification_key = PaymentVerificationKey.from_signing_key(payment_signing_key)
@@ -205,7 +207,7 @@ def run_bot_worker(wallet_file_path):
     chrome_options = Options()
     
     # --- Configuración de Chrome (Headless ON) ---
-    chrome_options.add_argument("--headless") 
+    #chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
@@ -309,7 +311,7 @@ def run_bot_worker(wallet_file_path):
         # 2. Simular clic (foco)
         signature_textarea.click() 
         # 3. Añadir espacio
-        signature_textarea.send_keys(" ")
+        signature_textarea.send_keys(Keys.SPACE)
         # 4. Borrar espacio
         signature_textarea.send_keys(Keys.BACKSPACE)
         log_bot("Firma pegada y edición simulada.")
@@ -326,7 +328,7 @@ def run_bot_worker(wallet_file_path):
         # 2. Simular clic (foco)
         public_key_input.click()
         # 3. Añadir espacio
-        public_key_input.send_keys(" ")
+        public_key_input.send_keys(Keys.SPACE)
         # 4. Borrar espacio
         public_key_input.send_keys(Keys.BACKSPACE)
         log_bot("Clave pública pegada y edición simulada.")
@@ -414,8 +416,13 @@ def run_bot_worker(wallet_file_path):
 
 
 # =============================================================================
-# SECCIÓN 3: LANZADOR PRINCIPAL (Sin cambios)
+# SECCIÓN 3: LANZADOR PRINCIPAL (Corregido para lanzar N procesos secuencialmente)
 # =============================================================================
+
+# --- CONFIGURACIÓN DE LANZAMIENTO ---
+DELAY_BETWEEN_LAUNCHES_SECONDS = 30 # <--- Retardo entre el inicio de cada bot/proceso
+# ------------------------------------
+
 
 if __name__ == "__main__":
     try:
@@ -424,37 +431,63 @@ if __name__ == "__main__":
         pass 
 
     # 1. Preguntar y gestionar carteras
+    cantidad_a_lanzar = 0
     while True:
         try:
-            num = int(input("¿Cuántas carteras necesitas tener en TOTAL? "))
-            if num > 0:
-                gestionar_pool_de_carteras(num)
+            # Preguntamos cuántos procesos (bots) quieres lanzar
+            cantidad_a_lanzar = int(input("¿Cuántos procesos (bots) quieres lanzar en TOTAL? "))
+            if cantidad_a_lanzar > 0:
+                # La función gestiona_pool_de_carteras asegurará que existen al menos N carteras.
+                gestionar_pool_de_carteras(cantidad_a_lanzar)
                 break
             else:
                 log.warning("Por favor, introduce un número positivo.")
         except ValueError:
             log.warning("Entrada no válida. Introduce un número.")
 
-    # 2. Encontrar todas las carteras que vamos a usar
+    # 2. Encontrar y seleccionar el número EXACTO de carteras a usar
     try:
-        archivos_cartera = [os.path.join(CARTERAS_DIR, f) for f in os.listdir(CARTERAS_DIR) if f.startswith('wallet_') and f.endswith('.json')]
-        if not archivos_cartera:
-            log.error("No se encontraron carteras para lanzar. Saliendo.")
+        archivos_disponibles = [os.path.join(CARTERAS_DIR, f) 
+                                for f in os.listdir(CARTERAS_DIR) 
+                                if f.startswith('wallet_') and f.endswith('.json')]
+        
+        # Ordenamos los archivos por el número (ej: wallet_1 antes de wallet_10)
+        archivos_disponibles.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0])) 
+        
+        # Seleccionamos EXACTAMENTE la cantidad de archivos a lanzar
+        archivos_a_lanzar = archivos_disponibles[:cantidad_a_lanzar]
+        
+        if len(archivos_a_lanzar) < cantidad_a_lanzar:
+            # Esto no debería pasar si la gestión de carteras fue exitosa.
+            log.error(f"Error fatal: No se encontraron {cantidad_a_lanzar} carteras. Saliendo.")
             sys.exit()
+            
     except FileNotFoundError:
         log.error(f"Directorio de carteras '{CARTERAS_DIR}' no encontrado. Saliendo.")
         sys.exit()
+    except Exception as e:
+        log.error(f"Error al seleccionar carteras: {e}. Asegúrate de que los nombres de archivo sean correctos (wallet_N.json).")
+        traceback.print_exc()
+        sys.exit()
 
-    log.info(f"\nSe lanzarán {len(archivos_cartera)} bots, uno para cada cartera.\n")
+
+    log.info(f"\nSe lanzarán {len(archivos_a_lanzar)} bots, uno por cada cartera seleccionada, con un retardo de {DELAY_BETWEEN_LAUNCHES_SECONDS}s entre cada uno.\n")
     time.sleep(3)
 
-    # 3. Lanzar un proceso por cada cartera
+    # 3. Lanzar N procesos secuencialmente (CON RETARDO)
     procesos = []
-    for wallet_file in archivos_cartera:
+    for i, wallet_file in enumerate(archivos_a_lanzar):
         p = Process(target=run_bot_worker, args=(wallet_file,))
         procesos.append(p)
         p.start()
-        time.sleep(2) # Stagger a los bots para no saturar al inicio
+        
+        # Lógica de retardo para un inicio controlado
+        wallet_id = os.path.basename(wallet_file).split('.')[0]
+        log.info(f"Lanzando {wallet_id} de {len(archivos_a_lanzar)}... (Pausa de {DELAY_BETWEEN_LAUNCHES_SECONDS}s antes del siguiente)")
+        
+        # Esperamos el retardo configurado (excepto si es el último)
+        if i < len(archivos_a_lanzar) - 1:
+            time.sleep(DELAY_BETWEEN_LAUNCHES_SECONDS) 
 
     log.info(f"--- ¡{len(procesos)} bots están ahora ejecutándose en segundo plano! ---")
     log.info("Puedes ver su progreso en esta terminal.")
