@@ -1,0 +1,4 @@
+pycardano==0.17.0
+mnemonic==0.21
+selenium==4.15.2
+webdriver-manager==4.0.1
