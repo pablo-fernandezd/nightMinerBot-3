@@ -40,7 +40,7 @@ log = logging.getLogger()
 # =============================================================================
 
 # =============================================================================
-# SECCIÓN 1: GESTOR DE CARTERAS (Lógica actual y funcional)
+# SECCIÓN 1: GESTOR DE CARTERAS (Sin cambios)
 # =============================================================================
 
 CARTERAS_DIR = "pool_de_carteras"
@@ -146,8 +146,11 @@ def gestionar_pool_de_carteras(cantidad_deseada):
 
 
 # =============================================================================
-# SECCIÓN 2: LÓGICA DEL BOT (WORKER) - (¡EDICIÓN MANUAL DE TECLAS!)
+# SECCIÓN 2: LÓGICA DEL BOT (WORKER) - (Sin cambios)
 # =============================================================================
+
+# Código de Salida Especial para "Cambio de Challenge"
+EXIT_CODE_EPOCH_CHANGE = 100
 
 # --- ¡FUNCIÓN DE FIRMA CIP-8! ---
 def firmar_mensaje_cip8(payment_signing_key: PaymentSigningKey, message_str: str) -> str:
@@ -170,8 +173,11 @@ def firmar_mensaje_cip8(payment_signing_key: PaymentSigningKey, message_str: str
 def run_bot_worker(wallet_file_path):
     """
     Esta función es el TRABAJO que realizará CADA bot de Selenium.
-    Se ha actualizado la lógica del bucle de monitoreo (Paso 15) para incluir
-    información detallada sobre los desafíos (All, Solved, Unsolved).
+    Ha sido actualizada para detectar:
+    1.  SOLVED: Sale con 'exit 0' (Éxito) para rotar a una NUEVA wallet.
+    2.  EPOCH CHANGE: Sale con 'exit 100' (Cambio) para rotar a la wallet PRINCIPAL.
+    3.  CRASH: Sale con 'exit 1' (Error) para reiniciar la MISMA wallet.
+    4.  Ctrl+C: Es capturado por el 'finally' para cerrar el driver limpiamente.
     """
     
     # Extraer un ID simple para los logs, ej: "wallet_1"
@@ -181,7 +187,7 @@ def run_bot_worker(wallet_file_path):
         # Función helper para que todos los logs de este bot tengan su ID
         log.log(level, f"[{wallet_id}] {mensaje}")
 
-    log_bot("Bot iniciado. Cargando datos de cartera...")
+    log_bot(f"Bot iniciado. Cargando datos de cartera: {wallet_file_path}")
 
     # 1. Cargar datos de la cartera
     wallet_data = {} 
@@ -190,11 +196,8 @@ def run_bot_worker(wallet_file_path):
             wallet_data = json.load(f)
         
         address = wallet_data["address"]
-        
-        # --- LÓGICA DE CARGA CIP-8 ---
         public_key = wallet_data["public_key_hex"]
         private_key_hex = wallet_data["payment_private_key_hex"] 
-        
         private_key_bytes = bytes.fromhex(private_key_hex)
         signing_key = PaymentSigningKey(private_key_bytes) 
         
@@ -203,18 +206,17 @@ def run_bot_worker(wallet_file_path):
     except Exception as e:
         log_bot(f"ERROR: No se pudo cargar o parsear el archivo {wallet_file_path}: {e}", logging.ERROR)
         traceback.print_exc()
-        return 
+        return # Sale con error (no 0), el manager lo reiniciará
 
     # 2. Configurar Selenium
     chrome_options = Options()
-    
-    # --- Configuración de Chrome (Headless ON) ---
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.85 Safari/537.36")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/90.0.4430.85 Safari/537.36")
     
+    driver = None # Definir el driver fuera del try para el 'finally'
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -223,7 +225,9 @@ def run_bot_worker(wallet_file_path):
     except Exception as e:
         log_bot(f"ERROR: No se pudo iniciar Selenium. {e}", logging.ERROR)
         traceback.print_exc()
-        return
+        if driver:
+            driver.quit() # Asegurarse de cerrar si el 'wait' falla
+        return # Sale con error (no 0), el manager lo reiniciará
 
     # 3. Bucle principal del bot (Lógica de clics)
     try:
@@ -231,9 +235,7 @@ def run_bot_worker(wallet_file_path):
         driver.get("https://sm.midnight.gd/wizard/mine")
         log_bot(f"Abierta la página: {driver.title}")
 
-        # Paso 2 a Paso 13 (Toda la lógica de pegado de dirección y firma permanece igual)
-        # ... (Mantén aquí el código original de los Pasos 2 a 13) ...
-
+        # --- INICIO LÓGICA DE LOGIN ---
         # Paso 2: Clic en "Enter an address manually"
         wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//button[contains(text(), 'Enter an address manually')]")
@@ -280,72 +282,43 @@ def run_bot_worker(wallet_file_path):
 
         # --- FASE DE FIRMA ---
         log_bot("Iniciando fase de firma...")
-
-        # Paso 9: Copiar mensaje a firmar
         message_element = wait.until(EC.visibility_of_element_located(
             (By.XPATH, "//div[contains(text(), 'I agree to abide by the terms')]")
         ))
         texto_challenge = message_element.text
-        log_bot(f"Mensaje a firmar obtenido: '{texto_challenge[:50]}...'")
-
-        # Paso 10: Firmar el mensaje (¡CON CIP-8 y CLAVE DE PAGO!)
         firma_hex = firmar_mensaje_cip8(signing_key, texto_challenge)
-        log_bot("Mensaje firmado localmente (con CIP-8).")
-
+        
         # --- ¡Guardar Firma en JSON! ---
         try:
-            log_bot("Guardando firma en el archivo JSON...")
             wallet_data["generated_signature"] = firma_hex 
             with open(wallet_file_path, 'w') as f: 
                 json.dump(wallet_data, f, indent=4)
-            log_bot("Firma guardada en JSON con éxito.")
         except Exception as e:
             log_bot(f"ADVERTENCIA: No se pudo guardar la firma en el JSON: {e}", logging.WARNING)
 
-        
         # --- ¡LÓGICA DE PEGADO Y EDICIÓN MANUAL! ---
-
-        # Paso 11: Pegar la firma (con JS y Edición Manual)
         signature_textarea = wait.until(EC.visibility_of_element_located(
             (By.XPATH, "//textarea[@placeholder='Please enter the signature generated by your wallet']")
         ))
-        
-        log_bot("Pegando firma (JS + Edición Manual: Espacio y Borrado)...")
-        # 1. Inyectar valor completo con JS
         driver.execute_script("arguments[0].value = arguments[1];", signature_textarea, firma_hex)
-        # 2. Simular clic (foco)
         signature_textarea.click() 
-        # 3. Añadir espacio
         signature_textarea.send_keys(Keys.SPACE)
-        # 4. Borrar espacio
         signature_textarea.send_keys(Keys.BACKSPACE)
-        log_bot("Firma pegada y edición simulada.")
-
-
-        # Paso 12: Pegar la clave pública (con JS y Edición Manual)
+        
         public_key_input = wait.until(EC.visibility_of_element_located(
             (By.XPATH, "//input[@placeholder='Please enter a public key']")
         ))
-        
-        log_bot("Pegando clave pública (JS + Edición Manual: Espacio y Borrado)...")
-        # 1. Inyectar valor completo con JS
         driver.execute_script("arguments[0].value = arguments[1];", public_key_input, public_key)
-        # 2. Simular clic (foco)
         public_key_input.click()
-        # 3. Añadir espacio
         public_key_input.send_keys(Keys.SPACE)
-        # 4. Borrar espacio
         public_key_input.send_keys(Keys.BACKSPACE)
-        log_bot("Clave pública pegada y edición simulada.")
-
-        # --- FIN DE LÓGICA DE PEGADO Y EDICIÓN MANUAL ---
-
 
         # Paso 13: Clic en "Sign"
         wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//button[text()='Sign']")
         )).click()
         log_bot("Clic en 'Sign'.")
+        # --- FIN LÓGICA LOGIN ---
 
 
         # Paso 14: Clic en "Start session"
@@ -353,9 +326,31 @@ def run_bot_worker(wallet_file_path):
         wait_long.until(EC.element_to_be_clickable(
             (By.XPATH, "//button[text()='Start session']")
         )).click()
-        log_bot("¡Sesión iniciada! Entrando en modo monitoreo.")
+        log_bot("¡Sesión iniciada! Estabilizando para capturar estado inicial...")
 
-        # Paso 15: Bucle de monitoreo (¡CÓDIGO ACTUALIZADO AQUÍ!)
+        # --- ¡NUEVO! Capturar estado inicial ---
+        time.sleep(10) # Espera 10s para que la página se estabilice
+        initial_solved_challenges = -1
+        initial_challenge_id = "-1"
+        try:
+            initial_solved_challenges_str = wait.until(EC.visibility_of_element_located(
+                (By.XPATH, "//span[@data-testid='solved-count']")
+            )).text
+            initial_solved_challenges = int(initial_solved_challenges_str)
+            
+            initial_challenge_id = driver.find_element(
+                By.XPATH, "//*[contains(text(), 'Current challenge:')]/following-sibling::span"
+            ).text
+            
+            log_bot(f"Estado inicial capturado -> Solved: {initial_solved_challenges}, Challenge ID: {initial_challenge_id}")
+        except Exception as e:
+            log_bot(f"Error capturando estado inicial. Asumiendo 0. Error: {e}", logging.WARNING)
+            initial_solved_challenges = 0 # Fallback
+            initial_challenge_id = "0" # Fallback
+        # --- FIN NUEVO ---
+
+
+        # Paso 15: Bucle de monitoreo (¡CÓDIGO DE ROTACIÓN ACTUALIZADO!)
         while True:
             try:
                 # --- Sección Snapshot ---
@@ -369,13 +364,14 @@ def run_bot_worker(wallet_file_path):
                     By.XPATH, "//*[contains(text(), 'All submitted solutions:')]/following-sibling::span"
                 ).text
 
-                # --- Sección Challenge Status (¡NUEVOS DATOS!) ---
+                # --- Capturar estado actual ---
                 all_challenges = driver.find_element(
                     By.XPATH, "//span[@data-testid='all-count']"
                 ).text
-                solved_challenges = driver.find_element(
+                current_solved_challenges_str = driver.find_element(
                     By.XPATH, "//span[@data-testid='solved-count']"
                 ).text
+                current_solved_challenges = int(current_solved_challenges_str)
                 unsolved_challenges = driver.find_element(
                     By.XPATH, "//span[@data-testid='unsolved-count']"
                 ).text
@@ -394,11 +390,26 @@ def run_bot_worker(wallet_file_path):
                     By.XPATH, "//*[contains(text(), 'Status:')]/following-sibling::span/span[1]"
                 ).text
 
+                # --- Log de Progreso ---
                 log_bot("----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
                 log_bot(f"PROGRESO: [{miner_status}] Claim: {claim} | Mis Sol: {my_solutions} / {all_solutions_submitted}")
-                log_bot(f"CHALLENGE STATUS: All: {all_challenges} | Solved: {solved_challenges} | Unsolved: {unsolved_challenges} | Current ID: {current_challenge_id}")
+                log_bot(f"CHALLENGE STATUS: All: {all_challenges} | Solved: {current_solved_challenges} (Initial: {initial_solved_challenges}) | Unsolved: {unsolved_challenges} | Current ID: {current_challenge_id} (Initial: {initial_challenge_id})")
                 log_bot(f"MINER STATUS: {status} | Próximo en: {next_challenge_in}")
                 log_bot("----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+
+                # --- ¡NUEVO! Lógica de salida por éxito ---
+                if current_solved_challenges > initial_solved_challenges:
+                    log_bot(f"¡ÉXITO! Challenge resuelto. (Solved: {current_solved_challenges} > {initial_solved_challenges})")
+                    log_bot("Cerrando este worker para rotación de NUEVA wallet. Saliendo con código 0...")
+                    driver.quit()
+                    sys.exit(0) # Salir con código 0 (Éxito)
+
+                # --- ¡NUEVO! Lógica de salida por Cambio de Challenge ---
+                if current_challenge_id != initial_challenge_id:
+                    log_bot(f"¡CAMBIO DE CHALLENGE! Nuevo ID: {current_challenge_id} (vs {initial_challenge_id}).")
+                    log_bot("Cerrando este worker para rotación a wallet PRINCIPAL. Saliendo con código 100...")
+                    driver.quit()
+                    sys.exit(EXIT_CODE_EPOCH_CHANGE) # Salir con código 100 (Cambio de Epoch)
 
             except (NoSuchElementException, TimeoutException) as e:
                 log_bot(f"Error al leer datos de progreso (puede ser temporal): {str(e)[:100]}... Refrescando...", logging.WARNING)
@@ -413,19 +424,27 @@ def run_bot_worker(wallet_file_path):
         log_bot("ERROR: Un elemento no se encontró o no estuvo clicable a tiempo. El bot se detendrá.", logging.ERROR)
         log_bot(f"URL actual: {driver.current_url}", logging.ERROR)
         traceback.print_exc()
+        # 'finally' se ejecutará, saliendo con código de error
     except Exception as e:
         log_bot(f"ERROR fatal en el bot: {e}", logging.ERROR)
         traceback.print_exc()
+        # 'finally' se ejecutará, saliendo con código de error
     finally:
-        driver.quit()
-        log_bot("Navegador cerrado. Proceso terminado.")
+        # ¡IMPORTANTE! Este 'finally' asegura que Chrome se cierre
+        # si ocurre cualquier error no manejado (Timeout, etc.)
+        # O si el proceso recibe un KeyboardInterrupt (Ctrl+C).
+        if driver:
+            driver.quit()
+        log_bot("Navegador cerrado. Proceso terminado (por 'finally').")
+
 
 # =============================================================================
-# SECCIÓN 3: LANZADOR PRINCIPAL (Corregido para lanzar N procesos secuencialmente)
+# SECCIÓN 3: SUPERVISOR DE WORKERS (ACTUALIZADO CON CIERRE LIMPIO)
 # =============================================================================
 
 # --- CONFIGURACIÓN DE LANZAMIENTO ---
-DELAY_BETWEEN_LAUNCHES_SECONDS = 30 # <--- Retardo entre el inicio de cada bot/proceso
+DELAY_BETWEEN_LAUNCHES_SECONDS = 30 # Retardo para el lanzamiento INICIAL de cada bot
+MANAGER_SLEEP_SECONDS = 10         # Tiempo que el supervisor espera antes de comprobar el estado de los workers
 # ------------------------------------
 
 
@@ -439,10 +458,9 @@ if __name__ == "__main__":
     cantidad_a_lanzar = 0
     while True:
         try:
-            # Preguntamos cuántos procesos (bots) quieres lanzar
             cantidad_a_lanzar = int(input("¿Cuántos procesos (bots) quieres lanzar en TOTAL? "))
             if cantidad_a_lanzar > 0:
-                # La función gestiona_pool_de_carteras asegurará que existen al menos N carteras.
+                log.info(f"Asegurando que existan al menos {cantidad_a_lanzar} carteras...")
                 gestionar_pool_de_carteras(cantidad_a_lanzar)
                 break
             else:
@@ -450,62 +468,139 @@ if __name__ == "__main__":
         except ValueError:
             log.warning("Entrada no válida. Introduce un número.")
 
-    # 2. Encontrar y seleccionar el número EXACTO de carteras a usar
+    # 2. Preparar la lista inicial y la cola de carteras
     try:
         archivos_disponibles = [os.path.join(CARTERAS_DIR, f) 
                                 for f in os.listdir(CARTERAS_DIR) 
                                 if f.startswith('wallet_') and f.endswith('.json')]
         
-        # Ordenamos los archivos por el número (ej: wallet_1 antes de wallet_10)
         archivos_disponibles.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0])) 
         
-        # Seleccionamos EXACTAMENTE la cantidad de archivos a lanzar
-        archivos_a_lanzar = archivos_disponibles[:cantidad_a_lanzar]
+        # Estas son las N carteras "principales"
+        principal_wallets = archivos_disponibles[:cantidad_a_lanzar]
         
-        if len(archivos_a_lanzar) < cantidad_a_lanzar:
-            # Esto no debería pasar si la gestión de carteras fue exitosa.
-            log.error(f"Error fatal: No se encontraron {cantidad_a_lanzar} carteras. Saliendo.")
+        # Esta es la cola de carteras de reemplazo
+        wallet_queue = [f for f in archivos_disponibles if f not in principal_wallets]
+        log.info(f"{len(wallet_queue)} carteras en cola de reemplazo.")
+
+        # Este es el ID de la próxima cartera a generar si la cola se vacía
+        next_wallet_id_to_gen = len(archivos_disponibles) + 1
+        
+        if len(principal_wallets) < cantidad_a_lanzar:
+            log.error(f"Error fatal: No se pudieron preparar {cantidad_a_lanzar} carteras. Saliendo.")
             sys.exit()
             
-    except FileNotFoundError:
-        log.error(f"Directorio de carteras '{CARTERAS_DIR}' no encontrado. Saliendo.")
-        sys.exit()
     except Exception as e:
-        log.error(f"Error al seleccionar carteras: {e}. Asegúrate de que los nombres de archivo sean correctos (wallet_N.json).")
+        log.error(f"Error al preparar las carteras: {e}.")
         traceback.print_exc()
         sys.exit()
 
 
-    log.info(f"\nSe lanzarán {len(archivos_a_lanzar)} bots, uno por cada cartera seleccionada, con un retardo de {DELAY_BETWEEN_LAUNCHES_SECONDS}s entre cada uno.\n")
+    log.info(f"\nSe lanzarán {cantidad_a_lanzar} workers (slots), con un retardo de {DELAY_BETWEEN_LAUNCHES_SECONDS}s entre cada uno.\n")
     time.sleep(3)
 
-    # 3. Lanzar N procesos secuencialmente (CON RETARDO)
-    procesos = []
-    for i, wallet_file in enumerate(archivos_a_lanzar):
+    # 3. Lanzar N procesos iniciales
+    worker_slots = [] # Esta lista mantendrá el estado de nuestros slots
+    for i in range(cantidad_a_lanzar):
+        wallet_file = principal_wallets[i]
+        wallet_id_log = os.path.basename(wallet_file).split('.')[0]
+        
+        log.info(f"Iniciando Slot {i} con {wallet_id_log} (Principal)...")
         p = Process(target=run_bot_worker, args=(wallet_file,))
-        procesos.append(p)
         p.start()
         
-        # Lógica de retardo para un inicio controlado
-        wallet_id = os.path.basename(wallet_file).split('.')[0]
-        log.info(f"Lanzando {wallet_id} de {len(archivos_a_lanzar)}... (Pausa de {DELAY_BETWEEN_LAUNCHES_SECONDS}s antes del siguiente)")
+        worker_slots.append({
+            "id": i,
+            "process": p,
+            "current_wallet_file": wallet_file,   # La wallet que está corriendo AHORA
+            "principal_wallet_file": wallet_file  # La wallet principal de ESTE slot
+        })
         
-        # Esperamos el retardo configurado (excepto si es el último)
-        if i < len(archivos_a_lanzar) - 1:
-            time.sleep(DELAY_BETWEEN_LAUNCHES_SECONDS) 
+        log.info(f"Slot {i} ({wallet_id_log}) lanzado. (Pausa de {DELAY_BETWEEN_LAUNCHES_SECONDS}s)")
+        time.sleep(DELAY_BETWEEN_LAUNCHES_SECONDS) 
 
-    log.info(f"--- ¡{len(procesos)} bots están ahora ejecutándose en segundo plano! ---")
-    log.info("Puedes ver su progreso en esta terminal.")
+    log.info(f"--- ¡{len(worker_slots)} workers están ahora ejecutándose! ---")
+    log.info(f"Iniciando bucle del Supervisor (comprobando cada {MANAGER_SLEEP_SECONDS}s).")
     log.info("Cierra esta ventana (o presiona Ctrl+C) para detener todos los bots.")
 
-    # 4. Esperar a que todos los procesos terminen
+    # 4. Bucle del Supervisor (Manager Loop)
     try:
-        for p in procesos:
-            p.join()
+        while True:
+            # Comprobar el estado de cada slot
+            for slot in worker_slots:
+                
+                # Si el proceso del slot está muerto, actuar
+                if not slot["process"].is_alive():
+                    exit_code = slot["process"].exitcode
+                    old_wallet = os.path.basename(slot["current_wallet_file"]).split('.')[0]
+                    principal_wallet_file = slot["principal_wallet_file"]
+                    principal_wallet_name = os.path.basename(principal_wallet_file).split('.')[0]
+                    slot_id = slot["id"]
+
+                    # CASO 1: ÉXITO (Challenge Resuelto, Exit Code 0)
+                    if exit_code == 0:
+                        log.info(f"Slot {slot_id} ({old_wallet}) completó challenge. ROTANDO a NUEVA wallet...")
+                        
+                        # 1. Obtener nueva cartera de la cola
+                        if wallet_queue:
+                            new_wallet_file = wallet_queue.pop(0)
+                            log.info(f"Siguiente cartera de la cola: {os.path.basename(new_wallet_file)}")
+                        else:
+                            # 2. Si no hay, generar una nueva
+                            log.info(f"Cola de carteras vacía. Generando nueva cartera: wallet_{next_wallet_id_to_gen}...")
+                            gestionar_pool_de_carteras(next_wallet_id_to_gen)
+                            new_wallet_file = os.path.join(CARTERAS_DIR, f"wallet_{next_wallet_id_to_gen}.json")
+                            next_wallet_id_to_gen += 1
+                        
+                        # 3. Lanzar nuevo proceso en el slot
+                        log.info(f"Iniciando Slot {slot_id} con {os.path.basename(new_wallet_file)}...")
+                        p = Process(target=run_bot_worker, args=(new_wallet_file,))
+                        p.start()
+                        slot["process"] = p
+                        slot["current_wallet_file"] = new_wallet_file # Actualiza la wallet actual
+
+                    # CASO 2: CAMBIO DE CHALLENGE (Exit Code 100)
+                    elif exit_code == EXIT_CODE_EPOCH_CHANGE:
+                        log.info(f"Slot {slot_id} ({old_wallet}) detectó CAMBIO DE CHALLENGE.")
+                        log.info(f"Rotando de vuelta a la wallet PRINCIPAL: {principal_wallet_name}")
+                        
+                        # 1. Lanzar nuevo proceso con la wallet PRINCIPAL
+                        p = Process(target=run_bot_worker, args=(principal_wallet_file,))
+                        p.start()
+                        slot["process"] = p
+                        slot["current_wallet_file"] = principal_wallet_file # Vuelve a la principal
+
+                    # CASO 3: CRASH (Cualquier otro Exit Code != 0)
+                    else:
+                        log.warning(f"Slot {slot_id} ({old_wallet}) crasheó (Exitcode: {exit_code}). REINICIANDO con la misma cartera...")
+                        
+                        # 1. Lanzar nuevo proceso con la MISMA cartera que crasheó
+                        p = Process(target=run_bot_worker, args=(slot["current_wallet_file"],))
+                        p.start()
+                        slot["process"] = p
+                        log.info(f"Slot {slot_id} ({old_wallet}) reiniciado.")
+
+            # Esperar antes de la próxima comprobación
+            time.sleep(MANAGER_SLEEP_SECONDS)
+
     except KeyboardInterrupt:
-        log.info("\nDeteniendo todos los procesos...")
-        for p in procesos:
-            if p.is_alive():
-                p.terminate()
-                p.join()
-        log.info("Todos los bots han sido detenidos.")
+        # --- ¡BLOQUE ACTUALIZADO PARA CIERRE LIMPIO! ---
+        log.info("\n[SUPERVISOR] Cierre por Ctrl+C detectado. Dando tiempo a los workers para cerrar limpiamente...")
+        # No enviamos terminate(). Los workers (hijos) también reciben el Ctrl+C
+        # y ejecutarán sus propios bloques 'finally' para llamar a driver.quit().
+        # Aquí, el supervisor solo debe ESPERAR a que terminen (join).
+        for slot in worker_slots:
+            if slot["process"].is_alive():
+                log.info(f"[SUPERVISOR] Esperando al Slot {slot['id']} (PID: {slot['process'].pid})...")
+                slot["process"].join() # Espera a que el proceso hijo termine limpiamente
+        log.info("[SUPERVISOR] Todos los workers han sido detenidos.")
+        # --- FIN DE LA ACTUALIZACIÓN ---
+
+    except Exception as e:
+        log.error(f"Error fatal en el Supervisor: {e}")
+        traceback.print_exc()
+        # Intentar limpieza (modo "forzado" si el supervisor falla)
+        for slot in worker_slots:
+            if slot["process"].is_alive():
+                log.warning(f"Forzando terminación del Slot {slot['id']}...")
+                slot["process"].terminate()
